@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>魚購入＆カウント管理</title>
+  <title>魚購入＆カウント管理（リアルタイム共有版）</title>
   <style>
     :root {
       --bg-color: #f0f4f8;
@@ -13,6 +13,7 @@
       --danger: #e63946;
       --text: #1d3557;
       --sub-text: #6c757d;
+      --success: #2a9d8f;
     }
 
     body {
@@ -29,6 +30,55 @@
     h1 {
       margin-bottom: 12px;
       font-size: 1.5rem;
+    }
+
+    /* 合言葉設定エリア */
+    .room-box {
+      width: 100%;
+      max-width: 400px;
+      background: #e0f2fe;
+      border: 1px solid #bae6fd;
+      padding: 12px 16px;
+      border-radius: 12px;
+      margin-bottom: 16px;
+      box-sizing: border-box;
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+    }
+
+    .room-box label {
+      font-size: 0.85rem;
+      font-weight: bold;
+      color: var(--primary);
+    }
+
+    .room-inputs {
+      display: flex;
+      gap: 8px;
+    }
+
+    .room-inputs input {
+      flex: 1;
+      padding: 8px 12px;
+      border-radius: 6px;
+      border: 1px solid #93c5fd;
+      font-size: 0.95rem;
+    }
+
+    .room-inputs button {
+      padding: 8px 16px;
+      background: var(--primary);
+      color: white;
+      border: none;
+      border-radius: 6px;
+      font-weight: bold;
+      cursor: pointer;
+    }
+
+    .status-text {
+      font-size: 0.8rem;
+      color: var(--sub-text);
     }
 
     /* 総額表示エリア */
@@ -205,10 +255,24 @@
       text-align: left;
     }
   </style>
+
+  <!-- Firebase SDK の読み込み -->
+  <script src="https://www.gstatic.com/firebasejs/9.22.1/firebase-app-compat.js"></script>
+  <script src="https://www.gstatic.com/firebasejs/9.22.1/firebase-database-compat.js"></script>
 </head>
 <body>
 
   <h1>🐟 魚カウンター＆購入管理</h1>
+
+  <!-- 共有用の合言葉設定エリア -->
+  <div class="room-box">
+    <label for="roomInput">🔑 共有の合言葉（同じ文字を入れた人と同期）</label>
+    <div class="room-inputs">
+      <input type="text" id="roomInput" placeholder="例: family-1234">
+      <button type="button" onclick="changeRoom()">接続</button>
+    </div>
+    <div class="status-text" id="statusText">未接続（合言葉を入力してください）</div>
+  </div>
 
   <!-- 総額表示エリア -->
   <div class="total-box">
@@ -241,84 +305,110 @@
   <div class="counter-list" id="counterList"></div>
 
   <script>
-    // ローカルタイムで「YYYY-MM-DD」を設定（UTCズレ防止）
+
+const firebaseConfig = {
+  apiKey: "AIzaSyCio5u657JiA7BW5WsS-QsJd8qCc5-Tz9s",
+  authDomain: "fish-counter-app.firebaseapp.com",
+  projectId: "fish-counter-app",
+  storageBucket: "fish-counter-app.firebasestorage.app",
+  messagingSenderId: "79424621179",
+  appId: "1:79424621179:web:56f10cdb306910283d30de",
+  measurementId: "G-RKMXDWH0H3"
+};
+
+    // Firebase 初期化
+    firebase.initializeApp(firebaseConfig);
+    const db = firebase.database();
+
+    let currentRoom = localStorage.getItem('fishRoomKey') || 'default-room';
+    document.getElementById('roomInput').value = currentRoom;
+
+    let fishData = {};
+    let roomRef = null;
+
+    // 今日の日付をセット
     const today = new Date();
     const localDate = today.getFullYear() + '-' + String(today.getMonth() + 1).padStart(2, '0') + '-' + String(today.getDate()).padStart(2, '0');
     document.getElementById('fishDateInput').value = localDate;
 
-    // XSS対策用のテキストエスケープ処理
+    // エスケープ処理
     function escapeHtml(str) {
-      return str.replace(/[&<>'"]/g, function(tag) {
-        return {
-          '&': '&amp;',
-          '<': '&lt;',
-          '>': '&gt;',
-          "'": '&#39;',
-          '"': '&quot;'
-        }[tag] || tag;
+      return (str || '').toString().replace(/[&<>'"]/g, tag => ({
+        '&': '&amp;', '<': '&lt;', '>': '&gt;', "'": '&#39;', '"': '&quot;'
+      }[tag] || tag));
+    }
+
+    // 部屋（合言葉）切り替え＆リアルタイム受信のセットアップ
+    function connectRoom(roomKey) {
+      if (roomRef) roomRef.off(); // 以前のリスナー解除
+
+      // 半角英数字ハイフン以外を除去して安全なキーにする
+      const safeKey = roomKey.replace(/[^a-zA-Z0-9_-]/g, '') || 'default-room';
+      currentRoom = safeKey;
+      localStorage.setItem('fishRoomKey', safeKey);
+
+      document.getElementById('statusText').textContent = `接続中: 「${safeKey}」`;
+      document.getElementById('statusText').style.color = 'var(--success)';
+
+      roomRef = db.ref('rooms/' + safeKey);
+      
+      // データ更新をリアルタイム監視
+      roomRef.on('value', snapshot => {
+        fishData = snapshot.val() || {};
+        render();
       });
     }
 
-    // ローカルストレージからデータ取得
-    let fishData = JSON.parse(localStorage.getItem('fishCounters')) || [];
-
-    // 保存＆再描画
-    function saveAndRender() {
-      localStorage.setItem('fishCounters', JSON.stringify(fishData));
-      render();
+    function changeRoom() {
+      const val = document.getElementById('roomInput').value.trim();
+      if (!val) {
+        alert('合言葉を入力してください');
+        return;
+      }
+      connectRoom(val);
     }
 
-    // 魚の追加（Form submitに対応）
+    // 魚の追加
     function addFish(e) {
       if (e) e.preventDefault();
 
-      const dateInput = document.getElementById('fishDateInput');
       const nameInput = document.getElementById('fishNameInput');
       const priceInput = document.getElementById('fishPriceInput');
+      const dateInput = document.getElementById('fishDateInput');
 
-      const date = dateInput.value;
       const name = nameInput.value.trim();
       const price = parseInt(priceInput.value, 10) || 0;
+      const date = dateInput.value;
 
-      if (!name) {
-        alert('魚種名を入力してください');
-        nameInput.focus();
-        return;
-      }
+      if (!name) return;
 
-      fishData.push({
-        id: Date.now(),
+      const newRef = roomRef.push();
+      newRef.set({
         date: date || '日付なし',
         name: name,
         price: price,
         count: 1
       });
 
-      // 入力欄のリセット
       nameInput.value = '';
       priceInput.value = '';
-      
-      saveAndRender();
     }
 
-    // 匹数の変更
+    // カウントの変更
     function changeCount(id, delta) {
-      const fish = fishData.find(item => item.id === id);
-      if (fish) {
-        fish.count = Math.max(0, fish.count + delta);
-        saveAndRender();
-      }
+      if (!fishData[id]) return;
+      const newCount = Math.max(0, (fishData[id].count || 0) + delta);
+      db.ref(`rooms/${currentRoom}/${id}`).update({ count: newCount });
     }
 
     // データの削除
     function deleteFish(id) {
       if (confirm('この項目を削除しますか？')) {
-        fishData = fishData.filter(item => item.id !== id);
-        saveAndRender();
+        db.ref(`rooms/${currentRoom}/${id}`).remove();
       }
     }
 
-    // 画面の更新処理
+    // 画面描写
     function render() {
       const list = document.getElementById('counterList');
       const totalAmountEl = document.getElementById('totalAmount');
@@ -326,8 +416,9 @@
 
       let grandTotal = 0;
 
-      fishData.forEach(fish => {
-        const itemTotal = fish.price * fish.count;
+      Object.keys(fishData).forEach(id => {
+        const fish = fishData[id];
+        const itemTotal = (fish.price || 0) * (fish.count || 0);
         grandTotal += itemTotal;
 
         const card = document.createElement('div');
@@ -336,13 +427,13 @@
           <div class="fish-info">
             <span class="fish-date">📅 ${escapeHtml(fish.date)}</span>
             <span class="fish-name">${escapeHtml(fish.name)}</span>
-            <span class="fish-price">¥${fish.price.toLocaleString()} / 匹 (計: ¥${itemTotal.toLocaleString()})</span>
-            <button type="button" class="btn-delete" onclick="deleteFish(${fish.id})">削除</button>
+            <span class="fish-price">¥${(fish.price || 0).toLocaleString()} / 匹 (計: ¥${itemTotal.toLocaleString()})</span>
+            <button type="button" class="btn-delete" onclick="deleteFish('${id}')">削除</button>
           </div>
           <div class="count-section">
-            <button type="button" class="btn-count btn-minus" onclick="changeCount(${fish.id}, -1)">-</button>
-            <span class="fish-count">${fish.count}</span>
-            <button type="button" class="btn-count btn-plus" onclick="changeCount(${fish.id}, 1)">+</button>
+            <button type="button" class="btn-count btn-minus" onclick="changeCount('${id}', -1)">-</button>
+            <span class="fish-count">${fish.count || 0}</span>
+            <button type="button" class="btn-count btn-plus" onclick="changeCount('${id}', 1)">+</button>
           </div>
         `;
         list.appendChild(card);
@@ -351,8 +442,8 @@
       totalAmountEl.textContent = `¥${grandTotal.toLocaleString()}`;
     }
 
-    // 初回表示
-    render();
+    // 初期接続
+    connectRoom(currentRoom);
   </script>
 </body>
 </html>
